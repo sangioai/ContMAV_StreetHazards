@@ -14,6 +14,11 @@ from src.models.resnet import NonBottleneck1D
 from src.models.model_utils import ConvBNAct
 
 
+debug = False
+
+def logging(mess):
+    if debug: print(mess)
+
 class Decoder(nn.Module):
     def __init__(
         self,
@@ -65,6 +70,9 @@ class Decoder(nn.Module):
         self.upsample2 = Upsample(mode=upsampling_mode, channels=num_classes)
 
     def forward(self, enc_outs):
+
+        # logging("Decoder forward ------")
+        # logging(f"inputs enc_outs shapes: {[e.shape for e in enc_outs]}")
         enc_out, enc_skip_down_16, enc_skip_down_8, enc_skip_down_4 = enc_outs
 
         out, _ = self.decoder_module_1(enc_out, enc_skip_down_16)
@@ -110,18 +118,27 @@ class DecoderModule(nn.Module):
         self.side_output = nn.Conv2d(channels_dec, num_classes, kernel_size=1)
 
     def forward(self, decoder_features, encoder_features):
+        # logging("- Sigle Decoder forward")
+        # logging(f"input decoder_features.shape:{decoder_features.shape}")
+        # logging(f"input encoder_features.shape:{encoder_features.shape}")
         out = self.conv3x3(decoder_features)
+        # logging(f"after 3x3 out.shape:{out.shape}")
         out = self.decoder_blocks(out)
+        # logging(f"after block out.shape:{out.shape}")
 
         if self.training:
             out_side = self.side_output(out)
+            # logging(f"after side_output out_side.shape:{out_side.shape}")
         else:
             out_side = None
 
         out = self.upsample(out)
+        # logging(f"after upsampling out.shape:{out.shape}")
 
         if self.encoder_decoder_fusion == "add":
             out += encoder_features
+        
+        logging(f"after encoder_decoder_fusion out.shape:{out.shape}")
 
         return out, out_side
 

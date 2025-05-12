@@ -15,6 +15,11 @@ from src.models.context_modules import get_context_module
 from src.models.model_utils import ConvBNAct, Swish, Hswish
 from src.models.model import Decoder
 
+debug = False
+
+def logging(mess):
+    if debug: print(mess)
+
 
 class OWSNetwork(nn.Module):
     def __init__(
@@ -40,6 +45,10 @@ class OWSNetwork(nn.Module):
             channels_decoder = [128, 128, 128]
         if nr_decoder_blocks is None:
             nr_decoder_blocks = [1, 1, 1]
+
+        print(f"channels_decoder: {channels_decoder}")
+        print(f"nr_decoder_blocks: {nr_decoder_blocks}")
+        print(f"activation: {activation}")
 
         self.weighting_in_encoder = weighting_in_encoder
 
@@ -151,6 +160,7 @@ class OWSNetwork(nn.Module):
         )
 
         # decoders
+        print(f"num_classes: {num_classes}")
         self.decoder_ss = Decoder(
             channels_in=channels_after_context_module,
             channels_decoder=channels_decoder,
@@ -168,38 +178,56 @@ class OWSNetwork(nn.Module):
             nr_decoder_blocks=nr_decoder_blocks,
             encoder_decoder_fusion=encoder_decoder_fusion,
             upsampling_mode=upsampling,
-            num_classes=19,
+            num_classes=19#num_classes#=19,#?? ok, because they could be less than eligible
         )
 
     def forward(self, image):
+        # logging("--> OWNetwork fowrward")
+        # logging(f"input image.shape:{image.shape}")
+        # logging("1- stem layers")
         out = self.encoder.forward_first_conv(image)
         out = self.se_layer0(out)
+        # logging(f"after forward_first_conv: {out.shape}")
         out = F.max_pool2d(out, kernel_size=3, stride=2, padding=1)
+        # logging(f"after max_pool2d: {out.shape}")
 
+        # logging(f"2- block 1 {out.shape}")
         # block 1
         out = self.encoder.forward_layer1(out)
         out = self.se_layer1(out)
         skip1 = self.skip_layer1(out)
 
         # block 2
+        # logging(f"3- block 2 {out.shape}")
         out = self.encoder.forward_layer2(out)
         out = self.se_layer2(out)
         skip2 = self.skip_layer2(out)
 
         # block 3
+        # logging(f"4- block 3 {out.shape}")
         out = self.encoder.forward_layer3(out)
         out = self.se_layer3(out)
         skip3 = self.skip_layer3(out)
 
         # block 4
+        # logging(f"5- block 4 {out.shape}")
         out = self.encoder.forward_layer4(out)
         out = self.se_layer4(out)
 
+        # logging(f"6- context_module {out.shape}")
         out = self.context_module(out)
 
         outs = [out, skip3, skip2, skip1]
 
-        return self.decoder_ss(enc_outs=outs), self.decoder_ow(enc_outs=outs)
+        # logging(f"7- decoder ss {out.shape}")
+        pred_scales = self.decoder_ss(enc_outs=outs)
+
+        # logging(f"8 - decoder ow")
+        ow_res = self.decoder_ow(enc_outs=outs)
+
+        # logging(f"-- OWNetwork  output: pred_scales.shape={pred_scales.shape} ow_res.shape={ow_res.shape} ")
+
+        return pred_scales, ow_res
 
 
 def main():
@@ -210,15 +238,15 @@ def main():
     print(model)
 
     model.eval()
-    # rgb_image = torch.randn(1, 3, 480, 640)
-    rgb_image = torch.randn(1, 3, 1080, 1920)
+    rgb_image = torch.randn(1, 3, 480, 640)
+    # rgb_image = torch.randn(1, 3, 1080, 1920) # dont' work cause last skip dim has dim 135 while corresponding decoding one is 136!!
+    # rgb_image = torch.randn(1, 3, 520, 1024) # neither the default oness
 
     from torch.autograd import Variable
 
     inputs_rgb = Variable(rgb_image)
     with torch.no_grad():
         output = model(inputs_rgb)
-    print(output.shape)
 
 
 if __name__ == "__main__":

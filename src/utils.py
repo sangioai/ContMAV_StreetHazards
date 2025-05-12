@@ -16,6 +16,17 @@ from torch import nn
 import torch
 import torch.nn.functional as F
 
+debug = False
+def logging(mess):
+    if debug: print(mess)
+
+def var_to_device(variable):
+    if torch.cuda.is_available():
+        return variable.cuda()
+    if torch.mps.is_available():
+        return variable.to("mps")
+    else:
+        return variable
 
 class ContrastiveLoss(nn.Module):
     def __init__(self, n_classes=19):
@@ -28,156 +39,311 @@ class ContrastiveLoss(nn.Module):
         emb_q: the embeddings for the current iteration
         labels: the correspondent class labels for each sample in emb_q
         """
-        if epoch:
-            total_loss = torch.tensor(0.0).cuda()
-            assert (
-                emb_q.shape[0] == labels.shape[0]
-            ), "mismatch on emb_q and labels shapes!"
-            emb_k = F.normalize(emb_k, dim=-1)
-            emb_q = F.normalize(emb_q, dim=1)
+        # if epoch: # don't need this
+        total_loss = var_to_device(torch.tensor(0.0)) 
+        assert (
+            emb_q.shape[0] == labels.shape[0]
+        ), "mismatch on emb_q and labels shapes!"
+        emb_k = F.normalize(emb_k, dim=-1)
+        emb_q = F.normalize(emb_q, dim=1)
 
-            for i, emb in enumerate(emb_q):
-                label = labels[i]
-                if not (255 in label.unique() and len(label.unique()) == 1):
-                    label[label == 255] = self.n_classes
-                    label_sq = torch.unique(label, return_inverse=True)[1]
-                    oh_label = (F.one_hot(label_sq)).unsqueeze(-2)  # one hot labels
-                    count = oh_label.view(-1, oh_label.shape[-1]).sum(
-                        dim=0
-                    )  # num of pixels per cl
-                    pred = emb.permute(1, 2, 0).unsqueeze(-1)
-                    oh_pred = (
-                        pred * oh_label
-                    )  # (H, W, Nc, Ncp) Ncp num classes present in the label
-                    oh_pred_flatten = oh_pred.view(
-                        oh_pred.shape[0] * oh_pred.shape[1],
-                        oh_pred.shape[2],
-                        oh_pred.shape[3],
-                    )
-                    res_raw = oh_pred_flatten.sum(dim=0) / count  # avg feat per class
-                    res_new = (res_raw[~res_raw.isnan()]).view(
-                        -1, self.n_classes
-                    )  # filter out nans given by intermediate classes (present because of oh)
-                    label_list = label.unique()
-                    if self.n_classes in label_list:
-                        label_list = label_list[:-1]
-                        res_new = res_new[:-1, :]
+        for i, emb in enumerate(emb_q):
+            label = labels[i]
+            if not (255 in label.unique() and len(label.unique()) == 1):
+                label[label == 255] = self.n_classes
+                label_sq = torch.unique(label, return_inverse=True)[1]
+                # logging(f"label_sq:{label_sq}")
+                oh_label = (F.one_hot(label_sq)).unsqueeze(-2)  # one hot labels
+                # logging(f"oh_label:{oh_label}")
+                count = oh_label.view(-1, oh_label.shape[-1]).sum(
+                    dim=0
+                )  # num of pixels per cl
+                # logging(f"count:{count}")
+                pred = emb.permute(1, 2, 0).unsqueeze(-1)
+                # logging(f"emb.shape:{emb.shape}")
+                # logging(f"pred.shape:{pred.shape}")
+                oh_pred = (
+                    pred * oh_label
+                )  # (H, W, Nc, Ncp) Ncp num classes present in the label
+                
+                # logging(f"oh_pred.shape:{oh_pred.shape}")
+                oh_pred_flatten = oh_pred.view(
+                    oh_pred.shape[0] * oh_pred.shape[1],
+                    oh_pred.shape[2],
+                    oh_pred.shape[3],
+                )
+                res_raw = oh_pred_flatten.sum(dim=0) / count  # avg feat per class
+                res_new = (res_raw[~res_raw.isnan()]).view(
+                    -1, self.n_classes
+                )  
+                # logging(f"res_new:{res_new}")
+                # logging(f"emb_k:{emb_k}")
+                # filter out nans given by intermediate classes (present because of oh)
+                label_list = label.unique()
+                if self.n_classes in label_list:
+                    label_list = label_list[:-1]
+                    res_new = res_new[:-1, :]
 
-                    # temperature-scaled cosine similarity
-                    final = (res_new.cuda() @ emb_k.T.cuda()) / 0.1
+                # temperature-scaled cosine similarity
+                final = (var_to_device(res_new) @ var_to_device(emb_k.T)) / tau
 
-                    loss = F.cross_entropy(final, label_list)
-                    total_loss += loss
+                # logging(f"final:{final}")
+                # logging(f"label:{label}")
+                # logging(f"label_list:{label_list}")
+                loss = F.cross_entropy(final, label_list)
+                total_loss += loss
 
-            return total_loss / emb_q.shape[0]
+        return total_loss / emb_q.shape[0]
 
-        return torch.tensor(0).cuda()
+        return var_to_device(torch.tensor(0))
 
 
 class OWLoss(nn.Module):
-    def __init__(self, n_classes, hinged=False, delta=0.1):
+    def __init__(self, n_classes, hinged=False, delta=0.1, n_accumulations=0, mav_squared=True):
         super().__init__()
         self.n_classes = n_classes
         self.hinged = hinged
         self.delta = delta
-        self.count = torch.zeros(self.n_classes).cuda()  # count for class
+        self.n_accumulations = n_accumulations
+        self.acc = n_accumulations
+        self.mav_squared = mav_squared
+        print(f"setting mav_squared.{mav_squared}")
+        self.count = var_to_device(torch.zeros(self.n_classes))  # count for class
         self.features = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
+            i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
+        }
+        self.features2 = {
+            i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
         }
         # See https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
         # for implementation of Welford Alg.
-        self.ex = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
-        self.ex2 = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
-        self.var = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
+        # self.ex = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
+        # self.ex2 = {
+        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
+        # }
 
         self.criterion = torch.nn.L1Loss(reduction="none")
 
         self.previous_features = None
+        self.previous_features2 = None
         self.previous_count = None
+
 
     @torch.no_grad()
     def cumulate(self, logits: torch.Tensor, sem_gt: torch.Tensor):
-        sem_pred = torch.argmax(torch.softmax(logits, dim=1), dim=1)
+        # logging(f"|---> OWLoss cumulate")
+        import pandas as pd
+        # logging(f"input logits:{logits.shape}")
+        # logging(pd.DataFrame(logits.detach().cpu().flatten()).describe())
+        # logging(f"input sem_gt:{sem_gt.shape}")
+        # logging(pd.DataFrame(sem_gt.detach().cpu().flatten()).describe())
+        # pixel wise prediction w/ softmax
+        sem_pred = torch.argmax(torch.softmax(logits, dim=1), dim=1) 
+        # logging(f"sem_pred.shape:{sem_pred.shape}")
+        # logging(pd.DataFrame(sem_pred.detach().cpu().flatten()).describe())
+        # list of labels present in this ground-truth target tensor
         gt_labels = torch.unique(sem_gt).tolist()
+        # logging(f"gt_labels:{gt_labels}")
+        # let's order by pixels
         logits_permuted = logits.permute(0, 2, 3, 1)
+        # for all label classes in this gt target tensor
         for label in gt_labels:
+            # logging(f"---->    label:{label}")
+            # if anomaly/void/unlabeled - skip
             if label == 255:
                 continue
+            # label mask on gt target
             sem_gt_current = sem_gt == label
+            # label mask ok prediction (softmax tensor)
             sem_pred_current = sem_pred == label
+            # true-positive mask btw this label and predictions
             tps_current = torch.logical_and(sem_gt_current, sem_pred_current)
+            # logging(f"tps_current:{tps_current.shape}")
+            # logging(pd.DataFrame(tps_current.detach().cpu().flatten()).describe())
+            # skip if no true-positive available
             if tps_current.sum() == 0:
                 continue
+            # get logtits where true-positives
             logits_tps = logits_permuted[torch.where(tps_current == 1)]
+            # logging(f"logits_tps.shape:{logits_tps.shape}")
             # max_values = logits_tps[:, label].unsqueeze(1)
             # logits_tps = logits_tps / max_values
+            # get mean of true pos logits
             avg_mav = torch.mean(logits_tps, dim=0)
+            # logging(f"avg_mav:{avg_mav.shape}")
+            # logging(pd.DataFrame(avg_mav.detach().cpu().flatten()).describe())
+            # get number of true positives
             n_tps = logits_tps.shape[0]
-            # features is running mean for mav
-            self.features[label] = (
-                self.features[label] * self.count[label] + avg_mav * n_tps
-            )
-
-            self.ex[label] += (logits_tps).sum(dim=0)
-            self.ex2[label] += ((logits_tps) ** 2).sum(dim=0)
+            # logging(f"n_tps:{n_tps}")
+            # # features is running mean for mav
+            # # logging(f"self.features[{label}]-0:{self.features[label]}")
+            # self.features[label] = (
+            #     self.features[label] * self.count[label] + avg_mav * n_tps
+            # )
+            # # logging(f"self.features[{label}]-1:{self.features[label]}")
+            # # save sum of tp logits
+            # self.ex[label] += (logits_tps).sum(dim=0)
+            # # logging(f" self.ex[{label}]:{ self.ex[label]}")
+            # # save sum of squared tp logits
+            # self.ex2[label] += ((logits_tps) ** 2).sum(dim=0)
+            # # logging(f" self.ex2[{label}]:{ self.ex2[label]}")
+            # # cumulate number of tp found
+            # self.count[label] += n_tps
+            # # logging(f"self.count[{label}]:{self.count[label]}")
+            # # 
+            # self.features[label] /= self.count[label] + 1e-8
+            # # logging(f"self.features[{label}]-2:{self.features[label]}")
+            ####
+            # my version - welford alg https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+            ###
+            # cumulate number of tp found
             self.count[label] += n_tps
-            self.features[label] /= self.count[label] + 1e-8
+            # logging(f"self.count[{label}]: {self.count[label]} (here:{n_tps})")
+            # # sum pixels feature-wise 
+            # logits_tps_sum = (logits_tps).sum(dim=0)
+            # # logging(f"logits_tps_sum: {logits_tps_sum.shape} {logits_tps_sum}")
+            #-> but can be large, let's divide before instead of later (-> compute contributions before then reduce)
+            logits_tps_contrib_sum = (logits_tps / (self.count[label] + 1e-8)).sum(dim=0)
+            # logging(f"logits_tps_contrib_sum: {logits_tps_contrib_sum.shape} {logits_tps_contrib_sum}")
+            #-> let's calc features contributions as well
+            features_contrib = self.features[label] / (self.count[label] + 1e-8)
+            # logging(f"features_contrib: {features_contrib.shape} {features_contrib}")
+            # get new data delta from mean
+            delta = logits_tps_contrib_sum - features_contrib
+            # logging(f"delta:{delta}")
+            # get new mean for label - add new contributions
+            self.features[label] = self.features[label] + delta # instead of: self.features[label] + (delta \ count)
+            # logging(f"self.features[label]:{self.features[label]}")
+            #-> let's calc features contributions as well
+            features_contrib = self.features[label] / (self.count[label] + 1e-8)
+            # logging(f"features_contrib: {features_contrib.shape} {features_contrib}")
+            # get new delta from new mean
+            delta2 = logits_tps_contrib_sum - features_contrib
+            # accumulate delta differences
+            self.features2[label] += (delta * delta2)
+            
+            # import pandas as pd
+            # print(f"label=[{label}]")
+            # print(pd.DataFrame(logits_tps.detach().cpu().flatten()).describe())
+            # logging(f"delta2:{delta2}")
+            # #-> let's calc features2 contributions as well
+            # var_contrib = self.var[label] / (self.count[label] + 1e-8)
+            # # logging(f"var_contrib: {var_contrib.shape} {var_contrib}")
+            # get new squared mean - useful for finalize standard deviation
+            # # logging(f"self.features2[label]:{self.features2[label]}")
+            # # get new variance for label
+            # self.var[label] = self.features2[label] / self.count[label]
+            # logging(f"self.var[label]:{self.var[label]}")
+            
+            # print(f"self.count[{label}]: {self.count[label]} (here:{n_tps}) (mean.mean:{self.features[label].mean()} (var.mean:{self.var[label].mean()})")
 
     def forward(
-        self, logits: torch.Tensor, sem_gt: torch.Tensor, is_train: torch.bool
+        self, logits: torch.Tensor, sem_gt: torch.Tensor, is_train: torch.bool  
     ) -> torch.Tensor:
         if is_train:
-            # update mav only at training time
             sem_gt = sem_gt.type(torch.uint8)
+            # update mav only at training time
             self.cumulate(logits, sem_gt)
-        if self.previous_features == None:
-            return torch.tensor(0.0).cuda()
-        gt_labels = torch.unique(sem_gt).tolist()
+            # do it only for 
+            self.acc -= 1
+                
+        if self.acc <= 0:
+            self.previous_features = self.features
+            self.previous_features2 = self.features2
+            self.previous_count = self.count
+            # restart accumulating
+            self.acc = self.n_accumulations
+            # reset  
+            self.count = var_to_device(torch.zeros(self.n_classes))  # count for class
+            self.features = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
+            self.features2 = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
 
+        
+        if self.previous_features is None:
+            return var_to_device(torch.tensor(0.0))
+
+        # list of labels present in this ground-truth target tensor
+        gt_labels = torch.unique(sem_gt).tolist()
+        # let's order by pixels
         logits_permuted = logits.permute(0, 2, 3, 1)
 
-        acc_loss = torch.tensor(0.0).cuda()
+        # acc_loss = var_to_device(torch.tensor(0.0))
+        # for label in gt_labels[:-1]:
+        #     mav = self.previous_features[label]
+        #     logs = logits_permuted[torch.where(sem_gt == label)]
+        #     mav = mav.expand(logs.shape[0], -1)
+        #     if self.previous_count[label] > 0:
+        #         ew_l1 = self.criterion(logs, mav)
+        #         ew_l1 = ew_l1 / (self.var[label] + 1e-8)
+        #         if self.hinged:
+        #             ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
+        #         acc_loss += ew_l1.mean()
+
+        acc_loss = var_to_device(torch.tensor(0.0))
+        
         for label in gt_labels[:-1]:
+            # finalize accumulations
             mav = self.previous_features[label]
+            var =  self.previous_features2[label]
             logs = logits_permuted[torch.where(sem_gt == label)]
             mav = mav.expand(logs.shape[0], -1)
             if self.previous_count[label] > 0:
-                ew_l1 = self.criterion(logs, mav)
-                ew_l1 = ew_l1 / (self.var[label] + 1e-8)
+                num = (self.criterion(logs, mav) ** 2 ) if self.mav_squared else (self.criterion(logs, mav))
+                den = (var[label] ** 2 + 1e-8)     if self.mav_squared else (var[label] + 1e-8)
+                # print(f"mav_squared[{label}]:{self.mav_squared}")
+                # print(f"num.max():{num.max()} num.min():{num.min()}")
+                # print(f"den.max():{den.max()} den.min():{den.min()}")
+                ew_l1 = num / den # squared
+                # logging(f"self.features[{label}]:{self.features[label]}")
+                # logging(f"self.var[{label}]:{self.var[label]}")
+                # logging(f"ew_l1[{label}]-1:{ew_l1}")
+                # logging(f"ew_l1[{label}]-2:{ew_l1}")
+                ew_l1_mean = ew_l1.mean()
+                # logging(f"ew_l1[{label}].mean-3:{ew_l1_mean}")
                 if self.hinged:
                     ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
-                acc_loss += ew_l1.mean()
-
+                    # logging(f"hinged ew_l1[{label}]:{ew_l1}")
+                acc_loss += ew_l1_mean # instead of mean
+                # logging(f"acc_loss:{acc_loss}")
+        
+        # print(f"count.max():{self.previous_count.max()} den.min():{self.previous_count.min()}")
         return acc_loss
 
     def update(self):
-        self.previous_features = self.features
-        self.previous_count = self.count
-        for c in self.var.keys():
-            self.var[c] = (self.ex2[c] - self.ex[c] ** 2 / (self.count[c] + 1e-8)) / (
-                self.count[c] + 1e-8
-            )
+        # self.previous_features = self.features
+        # self.previous_count = self.count
+        # for c in self.var.keys():
+        #     self.var[c] = (self.ex2[c] - self.ex[c] ** 2 / (self.count[c] + 1e-8)) / (
+        #         self.count[c] + 1e-8
+        #     )
 
-        # resetting for next epoch
-        self.count = torch.zeros(self.n_classes)  # count for class
-        self.features = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
-        self.ex = {i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)}
-        self.ex2 = {
-            i: torch.zeros(self.n_classes).cuda() for i in range(self.n_classes)
-        }
+        # # resetting for next epoch
+        # self.count = torch.zeros(self.n_classes)  # count for class
+        # self.features = {
+        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
+        # }
+        # self.ex = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
+        # self.ex2 = {
+        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
+        # }
 
-        return self.previous_features, self.var
-
+        # return self.previous_features, self.var
+        if self.previous_features is not None:
+            return self.previous_features, self.previous_features2
+        zeros = {
+            i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
+            }
+        return zeros, zeros
+    
     def read(self):
         mav_tensor = torch.zeros(self.n_classes, self.n_classes)
-        for key in self.previous_features.keys():
-            mav_tensor[key] = self.previous_features[key]
+        # if self.previous_features is not None:
+        #     for key in self.previous_features.keys():
+        #         mav_tensor[key] = self.previous_features[key]
+        
+        if self.features is not None:
+            for key in self.features.keys():
+                mav_tensor[key] = self.features[key]
         return mav_tensor
 
 
@@ -187,6 +353,7 @@ class ObjectosphereLoss(nn.Module):
         self.sigma = sigma
 
     def forward(self, logits, sem_gt):
+        # logging("-> ObjectosphereLoss forward")
         logits_unk = logits.permute(0, 2, 3, 1)[torch.where(sem_gt == 255)]
         logits_kn = logits.permute(0, 2, 3, 1)[torch.where(sem_gt != 255)]
 
@@ -206,7 +373,7 @@ class ObjectosphereLoss(nn.Module):
 class CrossEntropyLoss2d(nn.Module):
     def __init__(self, device, weight):
         super(CrossEntropyLoss2d, self).__init__()
-        self.weight = torch.tensor(weight).to(device)
+        self.weight = torch.tensor(weight).to(device) if device != torch.device("mps") else torch.tensor(weight).to(dtype=torch.float32).to(device)
         self.num_classes = len(self.weight) + 1  # +1 for void
         if self.num_classes < 2**8:
             self.dtype = torch.uint8
@@ -217,9 +384,11 @@ class CrossEntropyLoss2d(nn.Module):
             reduction="none",
             ignore_index=-1,
         )
-        self.ce_loss.to(device)
+        self.ce_loss.to(device) if device != torch.device("mps") else self.ce_loss.to(dtype=torch.float32).to(device)
 
     def forward(self, inputs, targets):
+        # logging("-> CrossEntropyLoss2d forward")
+        # logging(f"input inputs.shape:{inputs.shape} targets.shape:{targets.shape}")
         losses = []
         targets_m = targets.clone()
         if targets_m.sum() == 0:
@@ -229,13 +398,18 @@ class CrossEntropyLoss2d(nn.Module):
         number_of_pixels_per_class = torch.bincount(
             targets.flatten().type(self.dtype), minlength=self.num_classes
         )
+        import pandas as pd
+        # logging(f"targets values range: {targets.min()} - {targets.max()}")
+
+        # logging(f"after bincount number_of_pixels_per_class.shape:{number_of_pixels_per_class.shape}")
+        # logging(f"remember self.weight.shape:{self.weight.shape} values:{self.weight}")
         divisor_weighted_pixel_sum = torch.sum(
             number_of_pixels_per_class[1:] * self.weight
         )  # without void
         if divisor_weighted_pixel_sum > 0:
             losses.append(torch.sum(loss_all) / divisor_weighted_pixel_sum)
         else:
-            losses.append(torch.tensor(0.0).cuda())
+            losses.append(var_to_device(torch.tensor(0.0)))
 
         return losses
 
@@ -246,7 +420,7 @@ class CrossEntropyLoss2dForValidData:
         self.ce_loss = nn.CrossEntropyLoss(
             torch.from_numpy(np.array(weight)).float(), reduction="sum", ignore_index=-1
         )
-        self.ce_loss.to(device)
+        self.ce_loss.to(device) if device != torch.device("mps") else self.ce_loss.to(dtype=torch.float32).to(device)
         self.weighted_pixel_sum = weighted_pixel_sum
         self.total_loss = 0
 
@@ -269,7 +443,7 @@ class CrossEntropyLoss2dForValidDataUnweighted:
         self.ce_loss = nn.CrossEntropyLoss(
             weight=None, reduction="sum", ignore_index=-1
         )
-        self.ce_loss.to(device)
+        self.ce_loss.to(device) if device != torch.device("mps") else self.ce_loss.to(dtype=torch.float32).to(device)
         self.nr_pixels = 0
         self.total_loss = 0
 
@@ -336,7 +510,7 @@ def load_ckpt(model, optimizer, model_file, device):
     if os.path.isfile(model_file):
         print("=> loading checkpoint '{}'".format(model_file))
         if device.type == "cuda":
-            checkpoint = torch.load(model_file)
+            checkpoint = torch.load(model_file, map_location=device)
         else:
             checkpoint = torch.load(
                 model_file, map_location=lambda storage, loc: storage

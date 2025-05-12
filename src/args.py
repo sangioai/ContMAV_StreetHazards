@@ -64,6 +64,36 @@ class ArgumentParser(argparse.ArgumentParser):
             "useful when using a pretrained "
             "model on scenenet.",
         )
+        self.add_argument(
+            "--freeze_decoder_ss",
+            default=False,
+            type=bool,
+            help="Whether to freeze the semantic segmentation decoder",
+        )
+        self.add_argument(
+            "--freeze_encoder",
+            default=False,
+            type=bool,
+            help="Whether to freeze the encoder",
+        )
+        self.add_argument(
+            "--freeze_decoder_ow",
+            default=False,
+            type=bool,
+            help="WHhether to freeze the open-world decoder. ",
+        )
+        self.add_argument(
+            "--freeze_skip_layer",
+            default=False,
+            type=bool,
+            help="WHhether to freeze the skip layers. ",
+        )
+        self.add_argument(
+            "--freeze_context_module",
+            default=False,
+            type=bool,
+            help="WHhether to freeze the pyramid pooling module. ",
+        )
 
         # input dimensions
         self.add_argument(
@@ -111,6 +141,12 @@ class ArgumentParser(argparse.ArgumentParser):
             help="maximum learning rate. When using one_cycle "
             "as --lr_scheduler lr will first increase to "
             "the value provided and then slowly decrease.",
+        )
+        self.add_argument(
+            "--lr_scheduler",
+            default=True,
+            type=bool,
+            help="Whether to use a scheduler or not.",
         )
         self.add_argument(
             "--weight_decay", "--wd", default=1e-4, type=float, help="weight decay"
@@ -244,6 +280,7 @@ class ArgumentParser(argparse.ArgumentParser):
             default="cityscapes",
             choices=[
                 "cityscapes",
+                "streethazards"
             ],
         )
         self.add_argument(
@@ -273,7 +310,25 @@ class ArgumentParser(argparse.ArgumentParser):
             "--num_classes",
             default=19,
             type=int,
-            help="tests the overfit on one image",
+            help="The number of knwon classes.",
+        )
+        self.add_argument(
+            "--num_samples",
+            default=None,
+            type=int,
+            help="The number of data samples to limit the training data amount.",
+        )
+        self.add_argument(
+            "--num_skips",
+            default=None,
+            type=int,
+            help="The number of training data samples to skip for each usable sample, useful for video snapshots to avoid biased not really diverse samples.",
+        )
+        self.add_argument(
+            "--num_offset",
+            default=0,
+            type=int,
+            help="The training data actually used of the N training samples available is (i+num_offset) % num_skips, forall i in N",
         )
 
         # losses
@@ -288,6 +343,18 @@ class ArgumentParser(argparse.ArgumentParser):
             default=False,
             type=bool,
             help="use the MAV loss",
+        )
+        self.add_argument(
+            "--mav_accumulations",
+            default=None,
+            type=int,
+            help="Number of accumulations before proceding with forward of mav loss.",
+        )
+        self.add_argument(
+            "--mav_squared",
+            default=True,
+            type=bool,
+            help="Whether to use the squared mav loss function of Con2MAV, otherwise ContMav non-squared loss is used.",
         )
         self.add_argument(
             "--closs",

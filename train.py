@@ -20,6 +20,7 @@ import numpy as np
 from tqdm import tqdm
 
 import torch
+from torch.functional import F
 from torch.utils.tensorboard import SummaryWriter
 import torch.optim
 from torch.optim.lr_scheduler import OneCycleLR
@@ -31,17 +32,31 @@ from src.utils import save_ckpt_every_epoch
 from src.utils import load_ckpt
 from src.utils import print_log
 
+import pickle
 
-from torchmetrics import JaccardIndex as IoU
 
+from torchmetrics import JaccardIndex as IoU, AveragePrecision
 
-def parse_args():
+debug = True
+
+def logging(mess):
+    if debug: print(mess)
+
+def var_to_device(variable):
+    if torch.cuda.is_available():
+        return variable.cuda()
+    if torch.mps.is_available():
+        return variable.to("mps")
+    else:
+        return variable
+    
+def parse_args(args):
     parser = ArgumentParser(
         description="Open-World Semantic Segmentation (Training)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.set_common_args()
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     # The provided learning rate refers to the default batch size of 8.
     # When using different batch sizes we need to adjust the learning rate
     # accordingly:
@@ -55,8 +70,10 @@ def parse_args():
     return args
 
 
-def train_main():
-    args = parse_args()
+def train_main(args = []):
+    print("CALLING train_main")
+    args = parse_args(args)
+    print(args)
 
     # directory for storing weights and other training related files
     training_starttime = datetime.now().strftime("%d_%m_%Y-%H_%M_%S-%f")
@@ -74,9 +91,9 @@ def train_main():
         f.write("\n")
 
     # data preparation ---------------------------------------------------------
-    data_loaders = prepare_data(args, ckpt_dir)
-
-    train_loader, valid_loader, _ = data_loaders
+    # data_loaders = prepare_data(args, ckpt_dir)
+    # train_loader, valid_loader, _ = data_loaders
+    train_data, valid_data, test_data, train_loader, valid_loader, test_loader = prepare_data(args, ckpt_dir)
 
     n_classes_without_void = train_loader.dataset.n_classes_without_void
     if args.class_weighting != "None":
@@ -93,6 +110,11 @@ def train_main():
             if "out" not in name:
                 param.requires_grad = False
 
+    # freezing part - brr
+    if args.freeze_encoder or args.freeze_decoder_ss or args.freeze_decoder_ow:
+        if args.freeze_encoder: print("Freeze Encoder")
+        if args.freeze_decoder_ss: print("Freeze Semantic Seg Decoder")
+        if args.freeze_decoder_ow: print("Freeze Open World Decoder")
     # loss, optimizer, learning rate scheduler, csvlogger  ----------
 
     # loss functions
@@ -100,7 +122,8 @@ def train_main():
         weight=class_weighting, device=device
     )
     loss_objectosphere = utils.ObjectosphereLoss()
-    loss_mav = utils.OWLoss(n_classes=n_classes_without_void)
+    print(f"args.mav_squared:{args.mav_squared}")
+    loss_mav = utils.OWLoss(n_classes=n_classes_without_void, n_accumulations=args.mav_accumulations, mav_squared=args.mav_squared)
     loss_contrastive = utils.ContrastiveLoss(n_classes=n_classes_without_void)
 
     pixel_sum_valid_data = valid_loader.dataset.compute_class_weights(
@@ -128,15 +151,18 @@ def train_main():
     optimizer = get_optimizer(args, model)
 
     # in this script lr_scheduler.step() is only called once per epoch
+    scheduler_steps = args.epochs * ((len(train_data)+args.batch_size-1)//args.batch_size)
+    print(f"scheduler_steps = {scheduler_steps}")
+    
     lr_scheduler = OneCycleLR(
         optimizer,
         max_lr=[i["lr"] for i in optimizer.param_groups],
-        total_steps=args.epochs,
+        total_steps=scheduler_steps,
         div_factor=25,
         pct_start=0.1,
         anneal_strategy="cos",
         final_div_factor=1e4,
-    )
+    ) if args.lr_scheduler else None
 
     # load checkpoint if parameter last_ckpt is provided
     if args.last_ckpt:
@@ -145,13 +171,20 @@ def train_main():
             model, optimizer, ckpt_path, device
         )
         start_epoch = epoch_last_ckpt + 1
+        loss_mav.previous_features = mav_dict
+        loss_mav.previous_features2 = std_dict
+        print(f"loss_mav.features: {mav_dict}")
+        print(f"loss_mav.var: {std_dict}")
     else:
         start_epoch = 0
         best_miou = 0
         best_miou_epoch = 0
 
-    if args.load_weights:
-        model.load_state_dict(torch.load(args.load_weights))
+    if args.load_weights and args:
+        weights = torch.load(args.load_weights)
+        if weights["state_dict"]:
+            weights = weights["state_dict"]
+        model.load_state_dict(weights)
 
     writer = SummaryWriter("runs/" + ckpt_dir.split(args.dataset)[-1])
 
@@ -159,8 +192,19 @@ def train_main():
     for epoch in range(int(start_epoch), args.epochs):
         # unfreeze
         if args.freeze == epoch and args.finetune is None:
-            for param in model.parameters():
+            for name, param in model.named_parameters():
                 param.requires_grad = True
+                if args.freeze_encoder and name.startswith("encoder.") : 
+                    param.requires_grad = False
+                if args.freeze_decoder_ss and name.startswith("decoder_ss.") : 
+                    param.requires_grad = False
+                if args.freeze_decoder_ow and name.startswith("decoder_ow.") : 
+                    param.requires_grad = False
+                if args.freeze_skip_layer and name.startswith("skip_layer") : 
+                    param.requires_grad = False
+                if args.freeze_context_module and name.startswith("context_module.") : 
+                    param.requires_grad = False
+                # print(f"{name}\t\t\t{param.requires_grad}")
 
         mean, var = train_one_epoch(
             model=model,
@@ -206,11 +250,11 @@ def train_main():
                     os.path.join(ckpt_dir, "best_miou.pth"),
                 )
 
-    # save mavs to a pickle
-    with open("mavs.pickle", "wb") as h1:
-        pickle.dump(mean, h1, protocol=pickle.HIGHEST_PROTOCOL)
-    with open("vars.pickle", "wb") as h2:
-        pickle.dump(var, h2, protocol=pickle.HIGHEST_PROTOCOL)
+        # save mavs to a pickle
+        with open("mavs.pickle", "wb") as h1:
+            pickle.dump(mean, h1, protocol=pickle.HIGHEST_PROTOCOL)
+        with open("vars.pickle", "wb") as h2:
+            pickle.dump(var, h2, protocol=pickle.HIGHEST_PROTOCOL)
 
     print("Training completed ")
 
@@ -226,7 +270,6 @@ def train_one_epoch(
     writer,
     debug_mode=False,
 ):
-    lr_scheduler.step(epoch)
     samples_of_epoch = 0
 
     # set model to train mode
@@ -242,8 +285,8 @@ def train_one_epoch(
     total_con_loss = []
 
     mavs = None
-    if epoch and loss_contrastive is not None:
-        mavs = loss_mav.read()
+    # if epoch and loss_contrastive is not None and loss_mav is not None:
+    #     mavs = loss_mav.read()
     for i, sample in enumerate(train_loader):
         start_time_for_one_step = time.time()
 
@@ -251,7 +294,7 @@ def train_one_epoch(
         image = sample["image"].to(device)
         batch_size = image.data.shape[0]
 
-        label_ss = sample["label"].clone().cuda()
+        label_ss = var_to_device(sample["label"].clone())
         label_ss[label_ss == 255] = 0
         target_scales = label_ss
 
@@ -263,25 +306,41 @@ def train_one_epoch(
         pred_scales, ow_res = model(image)
         cw_target = target_scales.clone()
         # cw_target[cw_target > 16] = 255
+        # logging(f"model output shapes: pred_scales.shape={pred_scales.shape} ow_res.shape={ow_res.shape} ")
         losses = loss_function_train(pred_scales, cw_target)
         loss_segmentation = sum(losses)
+        print(f"loss_segmentation:{loss_segmentation}")
+        ow_res = ow_res[:, :pred_scales.shape[1], :, :] # quick bug-fix to have inited last decoder to 19 fixed classes, while i have only 12
         loss_objectosphere = torch.tensor(0.0)
         loss_ows = torch.tensor(0.0)
         loss_con = torch.tensor(0.0)
         total_loss = 0.9 * loss_segmentation
-        label = sample["label"].long().cuda() - 1
-        label[label < 0] = 255
+        label = var_to_device(sample["label"].long()) - 1 # 0-19 -> (-1)-18 , why??
+        label[label < 0] = 255 # maybe to have high values on anomalies??
 
         if loss_obj is not None:
-            label_ow = label.clone().cuda().to(torch.uint8)
+            label_ow = var_to_device(label.clone()).to(torch.uint8)
             loss_objectosphere = loss_obj(ow_res, label_ow)
             total_loss += 0.5 * loss_objectosphere
+            print(f"loss_objectosphere:{loss_objectosphere}")
         if loss_mav is not None:
             loss_ows = loss_mav(pred_scales, label, is_train=True)
             total_loss += 0.1 * loss_ows
-        if loss_contrastive is not None:
+            print(f"loss_ows:{loss_ows}")
+        if loss_contrastive is not None and loss_mav is not None:
+            mavs = loss_mav.read() # edit: read mavs here
             loss_con = loss_contrastive(mavs, ow_res, label, epoch)
             total_loss += 0.5 * loss_con
+            print(f"loss_con:{loss_con}")
+
+        glob_iteration  = epoch*len(train_loader)+i
+        
+        if lr_scheduler:
+            lr_scheduler.step(glob_iteration)
+            learning_rates = lr_scheduler.get_lr()
+            # save learning rate on tensorboard
+            for i, lr in enumerate(learning_rates):
+                writer.add_scalar(f"HyperParameter/lr_{i}", round(lr, 10), glob_iteration)
 
         total_loss.backward()
         optimizer.step()
@@ -308,8 +367,13 @@ def train_one_epoch(
         samples_of_epoch += batch_size
         time_inter = time.time() - start_time_for_one_step
 
-        learning_rates = lr_scheduler.get_lr()
+            
+        # update open-world class descriptors    
+        if loss_mav is not None:
+            mean, var = loss_mav.update()
+            # print(f"loss_mav mean:{mean}  var:{var}")
 
+        # print epoch info
         print_log(
             epoch,
             samples_of_epoch,
@@ -324,12 +388,13 @@ def train_one_epoch(
             # only one batch while debugging
             break
 
-    # fill the logs for csv log file and web logger
-    writer.add_scalar("Loss/train", np.mean(total_loss_list), epoch)
-    writer.add_scalar("Loss/semantic", np.mean(total_sem_loss), epoch)
-    writer.add_scalar("Loss/objectosphere", np.mean(total_obj_loss), epoch)
-    writer.add_scalar("Loss/ows", np.mean(total_ows_loss), epoch)
-    writer.add_scalar("Loss/contrastive", np.mean(total_con_loss), epoch)
+        # fill the logs for csv log file and web logger
+        writer.add_scalar("Loss/train", np.mean(total_loss_list), glob_iteration)
+        writer.add_scalar("Loss/semantic", np.mean(total_sem_loss), glob_iteration)
+        writer.add_scalar("Loss/objectosphere", np.mean(total_obj_loss), glob_iteration)
+        writer.add_scalar("Loss/ows", np.mean(total_ows_loss), glob_iteration)
+        writer.add_scalar("Loss/contrastive", np.mean(total_con_loss), glob_iteration)
+
 
     if loss_mav is not None:
         mean, var = loss_mav.update()
@@ -375,8 +440,14 @@ def validate(
         task="multiclass", num_classes=classes, average="none", ignore_index=255
     ).to(device)
 
+    
+    compute_ap = AveragePrecision(
+        task="binary", average="none", ignore_index=255
+    ).to(device)
+
     mavs = None
-    if loss_contrastive is not None:
+    
+    if loss_contrastive is not None and loss_mav is not None:
         mavs = loss_mav.read()
 
     total_loss_obj = []
@@ -390,19 +461,21 @@ def validate(
         # copy the data to gpu
         image = sample["image"].to(device)
 
-        if not device.type == "cpu":
+        if device.type == "cuda":
             torch.cuda.synchronize()
 
         # forward pass
         with torch.no_grad():
             prediction_ss, prediction_ow = model(image)
+            prediction_ow = prediction_ow[:, :prediction_ss.shape[1], :, :] # quick bug-fix to have inited last decoder to 19 fixed classes, while i have only 12
 
-            if not device.type == "cpu":
+
+            if device.type == "cuda":
                 torch.cuda.synchronize()
 
-            target = sample["label"].long().cuda() - 1
+            target = var_to_device(sample["label"].long()) - 1
             target[target == -1] = 255
-            compute_iou.update(prediction_ss, target.cuda())
+            compute_iou.update(prediction_ss, var_to_device(target))
 
             # compute valid loss
             loss_function_valid.add_loss_of_batch(
@@ -420,16 +493,38 @@ def validate(
                 loss_objectosphere = loss_obj(prediction_ow, sample["label"])
             total_loss_obj.append(loss_objectosphere.cpu().detach().numpy())
             if loss_mav is not None:
-                loss_ows = loss_mav(prediction_ss, target.cuda(), is_train=False)
+                loss_ows = loss_mav(prediction_ss, var_to_device(target), is_train=False)
             total_loss_mav.append(loss_ows.cpu().detach().numpy())
             if loss_contrastive is not None:
                 loss_con = loss_contrastive(mavs, prediction_ow, target, epoch)
             total_loss_con.append(loss_con.cpu().detach().numpy())
 
+            # # AUPR computation
+            # if loss_contrastive and loss_obj:
+            #     delta = 0.6
+            #     mavs, vars = loss_mav.update()
+            #     mavs = torch.vstack(tuple(mavs.values()))
+            #     vars = torch.vstack(tuple(vars.values()))
+
+            #     s_cont = contrastive_inference(prediction_ow)
+            #     s_sem, similarity = semantic_inference(prediction_ss, mavs, vars)
+            #     s_unk = (s_cont + s_sem) / 2
+
+            #     ows_binary_pred = (s_unk - delta).relu().bool().int()
+
+            #     target = var_to_device(sample["label"].long()) - 1
+            #     target[target < 0] = 1
+            #     target[target >= 0] = 0
+            #     target = target.to(torch.uint8)
+
+            #     compute_ap.update(ows_binary_pred.to(torch.float32),  var_to_device(target))
+                
+
             if debug_mode:
                 # only one batch while debugging
                 break
 
+    # aupr = compute_ap.compute().detach().cpu()
     ious = compute_iou.compute().detach().cpu()
     miou = ious.mean()
 
@@ -441,6 +536,7 @@ def validate(
     )
     writer.add_scalar("Loss/val", total_loss, epoch)
     writer.add_scalar("Metrics/miou", miou, epoch)
+    # writer.add_scalar("Metrics/aupr", aupr, epoch)
     for i, iou in enumerate(ious):
         writer.add_scalar(
             "Class_metrics/iou_{}".format(i),
@@ -486,7 +582,7 @@ def test_ow(
         image = sample["image"].to(device)
         label = sample["label"].to(device)
 
-        if not device.type == "cpu":
+        if device.type == "cuda":
             torch.cuda.synchronize()
 
         # forward pass
@@ -546,8 +642,7 @@ def contrastive_inference(predictions, radius=1.0):
     return scores
 
 
-def semantic_inference(predictions, mavs, var):
-    stds = torch.vstack(tuple(var.values())).cpu()  # 19x19
+def semantic_inference(predictions, mavs, stds):
     d_pred = (
         predictions[:, None, ...] - mavs[None, :, :, None, None]
     )  # [8,1,19,h,w] - [1,19,19,1,1]
@@ -587,7 +682,6 @@ def get_optimizer(args, model):
         "\n\n=========================================================================\n\n"
     )
     return optimizer
-
 
 if __name__ == "__main__":
     train_main()

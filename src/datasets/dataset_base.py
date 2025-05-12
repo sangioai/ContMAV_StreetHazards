@@ -15,10 +15,13 @@ import numpy as np
 from torch.utils.data import Dataset
 
 
+def default_proc(x):
+    return x
+
 class DatasetBase(abc.ABC, Dataset):
     def __init__(self):
         self._camera = None
-        self._default_preprocessor = lambda x: x
+        self._default_preprocessor = default_proc
         self.preprocessor = self._default_preprocessor
 
     def filter_camera(self, camera):
@@ -49,8 +52,8 @@ class DatasetBase(abc.ABC, Dataset):
 
         if self.with_input_orig:
             sample["image_orig"] = sample["image"].copy()
+            sample["label_orig"] = sample["label"].copy()
         sample = self.preprocessor(sample)
-
         return sample
 
     @property
@@ -153,7 +156,7 @@ class DatasetBase(abc.ABC, Dataset):
         n_image_pixels_with_class = np.zeros(self.n_classes)
         for i in range(len(self)):
             label = self.load_label(i)
-            label[label == 19] = 16
+            # label[label == 19] = 16 # WHY?
             h, w = label.shape
             current_dist = np.bincount(label.flatten(), minlength=self.n_classes)
             n_pixels_per_class += current_dist
@@ -165,7 +168,6 @@ class DatasetBase(abc.ABC, Dataset):
             n_image_pixels_with_class += class_in_image * h * w
 
             print(f"\r{i+1}/{len(self)}", end="")
-        print()
 
         # remove void
         n_pixels_per_class = n_pixels_per_class[1:]

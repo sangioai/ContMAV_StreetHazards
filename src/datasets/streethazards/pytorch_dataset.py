@@ -14,23 +14,25 @@ import numpy as np
 import cv2
 
 from ..dataset_base import DatasetBase
-from .cityscapes import CityscapesBase
+from .streethazards import StreetHazardsBase
 
 
-class Cityscapes(CityscapesBase, DatasetBase):
+class StreetHazards(StreetHazardsBase, DatasetBase):
     def __init__(
         self,
         data_dir=None,
-        n_classes=19,
+        n_classes=12,
+        n_samples=None,
+        n_skips=None,
+        n_offset=0,
         split="train",
         with_input_orig=False,
         overfit=False,
         classes=19,
     ):
-        super(Cityscapes, self).__init__()
+        super(StreetHazards, self).__init__()
         assert split in self.SPLITS
         assert n_classes in self.N_CLASSES
-        print(split)
         self._n_classes = classes
         self._split = split
         self._with_input_orig = with_input_orig
@@ -42,28 +44,39 @@ class Cityscapes(CityscapesBase, DatasetBase):
             assert os.path.exists(data_dir)
             self._data_dir = data_dir
 
-            # load file lists
-            if self.overfit:
-                self.images_path = os.path.join(data_dir, "leftImg8bit", "val")
-                self.labels_path = os.path.join(data_dir, "gtFine", "val")
-            else:
-                self.images_path = os.path.join(data_dir, "leftImg8bit", split)
-                self.labels_path = os.path.join(data_dir, "gtFine", split)
-            # self._files = {
-            #     "rgb": _loadtxt(f"{self._split}_rgb.txt"),
-            #     "label": _loadtxt(f"{self._split}_labels_{self._n_classes}.txt"),
-            # }
-            # assert all(len(l) == len(self._files["rgb"]) for l in self._files.values())
+            print(split)
+
+            # laoad subdir paths
+            if split == "test":
+                images_path = os.path.join(data_dir, "test/images")
+                annotations_path = os.path.join(data_dir, "test/annotations")
+            if split == "train":
+                images_path = os.path.join(data_dir, "train/images/training")
+                annotations_path = os.path.join(data_dir, "train/annotations/training")
+            if split == "valid" or split == "val" or self.overfit:
+                images_path = os.path.join(data_dir, "train/images/validation")
+                annotations_path = os.path.join(data_dir, "train/annotations/validation")
+
             self.images = []
             self.labels = []
 
-            for filename in glob.iglob(self.images_path + "/**/*.*", recursive=True):
+            # load file lists
+            for i, filename in enumerate(glob.iglob(images_path+"/**/*.png", recursive=True)):
+                # skip some images
+                if (n_skips is not None) and ((i+n_offset) % n_skips) != 0 and split == "train":
+                    continue
                 self.images.append(filename)
-            for filename in glob.iglob(
-                # self.labels_path + "/**/*labelTrainIds.png", recursive=True
-                self.labels_path + "/**/*labelIds.png", recursive=True
-            ):
+            for i, filename in enumerate(glob.iglob(annotations_path+"/**/*.png", recursive=True)):
+                # skip some images
+                if (n_skips is not None) and ((i+n_offset) % n_skips) != 0 and split == "train":
+                    continue
                 self.labels.append(filename)
+
+            # limit the number of samples in training data
+            if n_samples is not None and split == "train":
+                self.images = self.images[:n_samples] if n_samples < len(self.images) else self.images
+                self.labels = self.labels[:n_samples] if n_samples < len(self.labels) else self.labels
+
             self.images.sort()
             self.labels.sort()
 
@@ -72,14 +85,10 @@ class Cityscapes(CityscapesBase, DatasetBase):
         else:
             print(f"Loaded {self.__class__.__name__} dataset without files")
         # class names, class colors, and label directory
-        if self._n_classes == 19:
-            self._class_names = self.CLASS_NAMES_REDUCED
-            self._class_colors = np.array(self.CLASS_COLORS_REDUCED, dtype="uint8")
-            self._label_dir = self.LABELS_REDUCED_DIR
-        else:
-            self._class_names = self.CLASS_NAMES_FULL
-            self._class_colors = np.array(self.CLASS_COLORS_FULL, dtype="uint8")
-            self._label_dir = self.LABELS_FULL_DIR
+        self._class_names = self.CLASS_NAMES_FULL
+        self._class_colors = np.array(self.CLASS_COLORS_FULL, dtype="uint8")
+        self._label_dir = self.LABELS_FULL_DIR
+
         print(f"DATASET({data_dir}) image len:{len(self.images)}")
         print(f"DATASET({data_dir}) labels len:{len(self.labels)}")
 
@@ -138,14 +147,10 @@ class Cityscapes(CityscapesBase, DatasetBase):
 
     def load_label(self, idx):
         label = self._load(self.labels[idx])
-        label[label == -1] = 0
-        mapping_1plus33_to_1plus19 = np.array(
-                [Cityscapes.CLASS_MAPPING_REDUCED[i] for i in range(1 + 33)], dtype="uint8"
-            )
-        label = mapping_1plus33_to_1plus19[label]
+        label = label - 1 # 1-14 -> 0-13
         return label
 
     def __len__(self):
         if self.overfit:
-            return 2
-        return 40  # len(self.images)
+            return len(self.images) # 2
+        return len(self.images) # 40

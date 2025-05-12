@@ -22,6 +22,7 @@ def get_context_module(
     activation,
     upsampling_mode="bilinear",
 ):
+    print(f"context_module_name:{context_module_name}")
     if "appm" in context_module_name:
         if context_module_name == "appm-1-2-4-8":
             bins = (1, 2, 4, 8)

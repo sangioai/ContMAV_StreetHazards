@@ -22,14 +22,14 @@ class CityscapesBase:
 
     # 1+19 classes (0: void)
     CLASS_NAMES_REDUCED = ["void"] + [
-        label.name for label in labels if not label.ignoreInEval
+        label.name for label in labels if not label.ignoreInEval # delete void ones
     ]
     CLASS_COLORS_REDUCED = [(0, 0, 0)] + [
-        label.color for label in labels if not label.ignoreInEval
+        label.color for label in labels if not label.ignoreInEval # delete void ones
     ]
     # forward mapping (0: unlabeled) + 33 classes -> (0: void) + 19 classes
     CLASS_MAPPING_REDUCED = {
-        c: labels[c].trainId + 1 if not labels[c].ignoreInEval else 0
+        c: labels[c].trainId + 1 if not labels[c].ignoreInEval else 0 # all 255 and -1 will go to 0 cause are ignoreInEval
         for c in range(1 + 33)
     }
 

@@ -7,3 +7,4 @@
 ########################################################
 
 from .cityscapes.pytorch_dataset import Cityscapes
+from .streethazards.pytorch_dataset import StreetHazards

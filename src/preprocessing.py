@@ -20,15 +20,15 @@ def get_preprocessor(
     height=None,
     width=None,
     phase="train",
-    train_random_rescale=(1.0, 1.4),
+    train_random_rescale=(1.0, 1.4)
 ):
     assert phase in ["train", "test"]
 
     if phase == "train":
         transform_list = [
             RandomRescale(train_random_rescale),
-            RandomCrop(crop_height=height, crop_width=width),
-            RandomHSV((0.9, 1.1), (0.9, 1.1), (25, 25)),
+            RandomCrop(crop_height=height, crop_width=width), # it's more a RandomCropOrResize
+            RandomHSV((0.9, 1.1), (0.9, 1.1), (-25, 25)),
             RandomFlip(),
             ToTensor(),
             Normalize(),
@@ -47,7 +47,6 @@ def get_preprocessor(
         )
     transform = transforms.Compose(transform_list)
     return transform
-
 
 class Rescale:
     def __init__(self, height, width):
@@ -90,11 +89,11 @@ class RandomRescale:
             image, (target_width, target_height), interpolation=cv2.INTER_LINEAR
         )
         label = cv2.resize(
-            label, (target_width, target_height), interpolation=cv2.INTER_NEAREST
+            label, (target_width, target_height), interpolation=cv2.INTER_NEAREST # interesting: for labels uses nearest neighborhood
         )
         sample["image"] = image
         sample["label"] = label
-
+        
         return sample
 
 
@@ -134,19 +133,25 @@ class RandomHSV:
 
     def __call__(self, sample):
         img = sample["image"]
-        img_hsv = matplotlib.colors.rgb_to_hsv(img)
+        # img = img / 255.0 # added because img is not in [0,1]
+        img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        dtype_hsv = img_hsv.dtype
         img_h = img_hsv[:, :, 0]
         img_s = img_hsv[:, :, 1]
         img_v = img_hsv[:, :, 2]
 
         h_random = np.random.uniform(min(self.h_range), max(self.h_range))
         s_random = np.random.uniform(min(self.s_range), max(self.s_range))
-        v_random = np.random.uniform(-min(self.v_range), max(self.v_range))
-        img_h = np.clip(img_h * h_random, 0, 1)
-        img_s = np.clip(img_s * s_random, 0, 1)
-        img_v = np.clip(img_v + v_random, 0, 255)
+        # v_random = np.random.uniform(-min(self.v_range), max(self.v_range)) # why bro this shit
+        v_random = np.random.uniform(min(self.v_range), max(self.v_range)) # why bro this shit
+        # img_h = np.clip(img_h * h_random, 0, 1) # why 0-1
+        # img_s = np.clip(img_s * s_random, 0, 1) # why 0-1
+        img_h = np.clip(img_h * h_random, 0, 255).round().astype(dtype_hsv)  # cazzo
+        img_s = np.clip(img_s * s_random, 0, 255).round().astype(dtype_hsv)  # cazzo
+        img_v = np.clip(img_v + v_random, 0, 255).astype(dtype_hsv)
         img_hsv = np.stack([img_h, img_s, img_v], axis=2)
-        img_new = matplotlib.colors.hsv_to_rgb(img_hsv)
+        # img_new = matplotlib.colors.hsv_to_rgb(img_hsv)
+        img_new = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2RGB)
 
         sample["image"] = img_new
 
@@ -177,6 +182,16 @@ class Normalize:
         sample["image"] = image
 
         return sample
+    
+
+class UnNormalize:
+    def __call__(self, sample):
+        image = sample["image"]
+        image = sample["image"] * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
+
+        sample["image"] = image
+
+        return sample
 
 
 class ToTensor:
@@ -189,6 +204,21 @@ class ToTensor:
         if "label" in sample:
             label = sample["label"]
             sample["label"] = torch.from_numpy(label).float()
+
+        return sample
+
+
+
+class ToNumpy:
+    def __call__(self, sample):
+        image = sample["image"]
+        image = image.permute((1, 2, 0))
+
+        sample["image"] = image.numpy()
+
+        if "label" in sample:
+            label = sample["label"]
+            sample["label"] = label.numpy()
 
         return sample
 

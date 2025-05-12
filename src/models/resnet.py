@@ -505,6 +505,9 @@ def ResNet18(
 def ResNet34(
     pretrained_on_imagenet=False, pretrained_dir="./trained_models/imagenet", **kwargs
 ):
+    ''' 
+        Custom ResNet34 pre-trained but w/ different bottleneck block
+    '''
     if "block" not in kwargs:
         kwargs["block"] = BasicBlock
     else:
@@ -543,6 +546,7 @@ def ResNet34(
 
 
 def ResNet50(pretrained_on_imagenet=False, **kwargs):
+    ## custom resNet from scratch
     model = ResNet([3, 4, 6, 3], Bottleneck, **kwargs)
     if "input_channels" in kwargs and kwargs["input_channels"] == 1:
         input_channels = 1
@@ -584,6 +588,8 @@ def load_pretrained_with_different_encoder_block(
     # load weights
     if torch.cuda.is_available():
         checkpoint = torch.load(ckpt_path)
+    elif torch.mps.is_available():
+        checkpoint = torch.load(ckpt_path, map_location=torch.device("mps"))
     else:
         checkpoint = torch.load(ckpt_path, map_location=torch.device("cpu"))
     checkpoint["state_dict2"] = OrderedDict()

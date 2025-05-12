@@ -62,6 +62,8 @@ def build_model(args, n_classes):
 
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
+    elif torch.mps.is_available():
+        device = torch.device("mps")
     else:
         device = torch.device("cpu")
 
@@ -72,7 +74,7 @@ def build_model(args, n_classes):
     # print(model)
     # summary(model)
 
-    print("Number of parameters:", summary(model, verbose=False).total_params)
+    # print("Number of parameters:", summary(model, ( 1, args.height, args.width), 1).total_params)
     print("\n\n")
     if args.he_init:
         module_list = []
@@ -93,7 +95,7 @@ def build_model(args, n_classes):
             if isinstance(m, (nn.Conv2d, nn.Conv1d, nn.Linear)):
                 if (
                     m.out_channels == n_classes
-                    or m.out_channels == 19
+                    or m.out_channels == 19 # 12? same as in ow_decoder, done cause of n_classes can be less
                     or isinstance(module_list[i + 1], nn.Sigmoid)
                     or m.groups == m.in_channels
                 ):

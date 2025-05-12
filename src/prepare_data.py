@@ -11,13 +11,18 @@ from torch.utils.data import DataLoader
 
 from src import preprocessing
 from src.datasets import Cityscapes
+from src.datasets import StreetHazards
 
 
 def prepare_data(args, ckpt_dir=None, with_input_orig=False, split=None):
     train_preprocessor_kwargs = {}
     if args.dataset == "cityscapes":
         Dataset = Cityscapes
-        dataset_kwargs = {"n_classes": 19}
+        dataset_kwargs = {"n_classes": args.num_classes}
+        valid_set = "val"
+    elif args.dataset == "streethazards":
+        Dataset = StreetHazards
+        dataset_kwargs = {"n_classes": args.num_classes, "n_samples": args.num_samples, "n_skips": args.num_skips, "n_offset": args.num_offset}
         valid_set = "val"
     else:
         raise ValueError(f"Unknown dataset: `{args.dataset}`")
@@ -124,8 +129,8 @@ def prepare_data(args, ckpt_dir=None, with_input_orig=False, split=None):
     )
 
     # count_classes(train_loader, valid_loader)
-
-    return train_loader, valid_loader, test_loader
+    
+    return train_data, valid_data, test_data, train_loader, valid_loader, test_loader
 
 
 import torch
