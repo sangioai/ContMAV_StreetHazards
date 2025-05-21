@@ -31,6 +31,7 @@ from src.prepare_data import prepare_data
 from src.utils import save_ckpt_every_epoch
 from src.utils import load_ckpt
 from src.utils import print_log
+from src.utils import show_preds, plot_to_image, ss_postprocess_fn
 
 import pickle
 
@@ -71,7 +72,6 @@ def parse_args(args):
 
 
 def train_main(args = []):
-    print("CALLING train_main")
     args = parse_args(args)
     print(args)
 
@@ -179,12 +179,6 @@ def train_main(args = []):
         start_epoch = 0
         best_miou = 0
         best_miou_epoch = 0
-
-    if args.load_weights and args:
-        weights = torch.load(args.load_weights)
-        if weights["state_dict"]:
-            weights = weights["state_dict"]
-        model.load_state_dict(weights)
 
     writer = SummaryWriter("runs/" + ckpt_dir.split(args.dataset)[-1])
 
@@ -328,7 +322,7 @@ def train_one_epoch(
             total_loss += 0.1 * loss_ows
             print(f"loss_ows:{loss_ows}")
         if loss_contrastive is not None and loss_mav is not None:
-            mavs = loss_mav.read() # edit: read mavs here
+            mavs, vars = loss_mav.read() # edit: read mavs here
             loss_con = loss_contrastive(mavs, ow_res, label, epoch)
             total_loss += 0.5 * loss_con
             print(f"loss_con:{loss_con}")
@@ -446,9 +440,10 @@ def validate(
     ).to(device)
 
     mavs = None
+    vars = None
     
     if loss_contrastive is not None and loss_mav is not None:
-        mavs = loss_mav.read()
+        mavs, vars = loss_mav.read()
 
     total_loss_obj = []
     total_loss_mav = []
@@ -524,6 +519,16 @@ def validate(
                 # only one batch while debugging
                 break
 
+    # get mavs, stds
+    mavs, vars = loss_mav.read()
+    # dict-of-arrays to array-of-dicts
+    sample_arr = [{"image":sample["image"][i], "label":sample["label"][i], "name":sample["name"][i]} for i,_ in enumerate(sample["image"])]
+    # figure to image
+    pred_titles = [f"sem{'+mav' if loss_mav else ''}{'+obj' if loss_mav else ''}{'+con' if loss_mav else ''}", f"ContMAV ss_score", f"ContMAV sim_score"]
+    fig = show_preds(ss_postprocess_fn(prediction_ss, None, mavs, vars), sample_arr, show=False, titles=pred_titles)
+    img = plot_to_image(fig, "./images", f"{epoch}.png")
+    
+
     # aupr = compute_ap.compute().detach().cpu()
     ious = compute_iou.compute().detach().cpu()
     miou = ious.mean()
@@ -536,6 +541,8 @@ def validate(
     )
     writer.add_scalar("Loss/val", total_loss, epoch)
     writer.add_scalar("Metrics/miou", miou, epoch)
+    writer.add_image("Images/segmentation", img, epoch, dataformats="HWC")
+    # writer.add_image("Images/anomaly", miou, epoch)
     # writer.add_scalar("Metrics/aupr", aupr, epoch)
     for i, iou in enumerate(ious):
         writer.add_scalar(

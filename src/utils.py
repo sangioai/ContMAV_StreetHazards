@@ -10,11 +10,14 @@
 import os
 import sys
 
-import pandas as pd
-import numpy as np
-from torch import nn
+import cv2
 import torch
+import numpy as np
+import pandas as pd
+from torch import nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from src.preprocessing import UnNormalize, ToNumpy
 
 debug = False
 def logging(mess):
@@ -39,7 +42,6 @@ class ContrastiveLoss(nn.Module):
         emb_q: the embeddings for the current iteration
         labels: the correspondent class labels for each sample in emb_q
         """
-        # if epoch: # don't need this
         total_loss = var_to_device(torch.tensor(0.0)) 
         assert (
             emb_q.shape[0] == labels.shape[0]
@@ -52,21 +54,15 @@ class ContrastiveLoss(nn.Module):
             if not (255 in label.unique() and len(label.unique()) == 1):
                 label[label == 255] = self.n_classes
                 label_sq = torch.unique(label, return_inverse=True)[1]
-                # logging(f"label_sq:{label_sq}")
                 oh_label = (F.one_hot(label_sq)).unsqueeze(-2)  # one hot labels
-                # logging(f"oh_label:{oh_label}")
                 count = oh_label.view(-1, oh_label.shape[-1]).sum(
                     dim=0
                 )  # num of pixels per cl
-                # logging(f"count:{count}")
                 pred = emb.permute(1, 2, 0).unsqueeze(-1)
-                # logging(f"emb.shape:{emb.shape}")
-                # logging(f"pred.shape:{pred.shape}")
                 oh_pred = (
                     pred * oh_label
                 )  # (H, W, Nc, Ncp) Ncp num classes present in the label
                 
-                # logging(f"oh_pred.shape:{oh_pred.shape}")
                 oh_pred_flatten = oh_pred.view(
                     oh_pred.shape[0] * oh_pred.shape[1],
                     oh_pred.shape[2],
@@ -76,8 +72,6 @@ class ContrastiveLoss(nn.Module):
                 res_new = (res_raw[~res_raw.isnan()]).view(
                     -1, self.n_classes
                 )  
-                # logging(f"res_new:{res_new}")
-                # logging(f"emb_k:{emb_k}")
                 # filter out nans given by intermediate classes (present because of oh)
                 label_list = label.unique()
                 if self.n_classes in label_list:
@@ -87,15 +81,10 @@ class ContrastiveLoss(nn.Module):
                 # temperature-scaled cosine similarity
                 final = (var_to_device(res_new) @ var_to_device(emb_k.T)) / tau
 
-                # logging(f"final:{final}")
-                # logging(f"label:{label}")
-                # logging(f"label_list:{label_list}")
                 loss = F.cross_entropy(final, label_list)
                 total_loss += loss
 
         return total_loss / emb_q.shape[0]
-
-        return var_to_device(torch.tensor(0))
 
 
 class OWLoss(nn.Module):
@@ -115,12 +104,6 @@ class OWLoss(nn.Module):
         self.features2 = {
             i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
         }
-        # See https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
-        # for implementation of Welford Alg.
-        # self.ex = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
-        # self.ex2 = {
-        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
-        # }
 
         self.criterion = torch.nn.L1Loss(reduction="none")
 
@@ -131,24 +114,14 @@ class OWLoss(nn.Module):
 
     @torch.no_grad()
     def cumulate(self, logits: torch.Tensor, sem_gt: torch.Tensor):
-        # logging(f"|---> OWLoss cumulate")
-        import pandas as pd
-        # logging(f"input logits:{logits.shape}")
-        # logging(pd.DataFrame(logits.detach().cpu().flatten()).describe())
-        # logging(f"input sem_gt:{sem_gt.shape}")
-        # logging(pd.DataFrame(sem_gt.detach().cpu().flatten()).describe())
         # pixel wise prediction w/ softmax
         sem_pred = torch.argmax(torch.softmax(logits, dim=1), dim=1) 
-        # logging(f"sem_pred.shape:{sem_pred.shape}")
-        # logging(pd.DataFrame(sem_pred.detach().cpu().flatten()).describe())
         # list of labels present in this ground-truth target tensor
         gt_labels = torch.unique(sem_gt).tolist()
-        # logging(f"gt_labels:{gt_labels}")
         # let's order by pixels
         logits_permuted = logits.permute(0, 2, 3, 1)
         # for all label classes in this gt target tensor
         for label in gt_labels:
-            # logging(f"---->    label:{label}")
             # if anomaly/void/unlabeled - skip
             if label == 255:
                 continue
@@ -158,85 +131,34 @@ class OWLoss(nn.Module):
             sem_pred_current = sem_pred == label
             # true-positive mask btw this label and predictions
             tps_current = torch.logical_and(sem_gt_current, sem_pred_current)
-            # logging(f"tps_current:{tps_current.shape}")
-            # logging(pd.DataFrame(tps_current.detach().cpu().flatten()).describe())
             # skip if no true-positive available
             if tps_current.sum() == 0:
                 continue
             # get logtits where true-positives
             logits_tps = logits_permuted[torch.where(tps_current == 1)]
-            # logging(f"logits_tps.shape:{logits_tps.shape}")
-            # max_values = logits_tps[:, label].unsqueeze(1)
-            # logits_tps = logits_tps / max_values
             # get mean of true pos logits
             avg_mav = torch.mean(logits_tps, dim=0)
-            # logging(f"avg_mav:{avg_mav.shape}")
-            # logging(pd.DataFrame(avg_mav.detach().cpu().flatten()).describe())
             # get number of true positives
             n_tps = logits_tps.shape[0]
-            # logging(f"n_tps:{n_tps}")
-            # # features is running mean for mav
-            # # logging(f"self.features[{label}]-0:{self.features[label]}")
-            # self.features[label] = (
-            #     self.features[label] * self.count[label] + avg_mav * n_tps
-            # )
-            # # logging(f"self.features[{label}]-1:{self.features[label]}")
-            # # save sum of tp logits
-            # self.ex[label] += (logits_tps).sum(dim=0)
-            # # logging(f" self.ex[{label}]:{ self.ex[label]}")
-            # # save sum of squared tp logits
-            # self.ex2[label] += ((logits_tps) ** 2).sum(dim=0)
-            # # logging(f" self.ex2[{label}]:{ self.ex2[label]}")
-            # # cumulate number of tp found
-            # self.count[label] += n_tps
-            # # logging(f"self.count[{label}]:{self.count[label]}")
-            # # 
-            # self.features[label] /= self.count[label] + 1e-8
-            # # logging(f"self.features[{label}]-2:{self.features[label]}")
             ####
-            # my version - welford alg https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+            # welford alg https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
             ###
             # cumulate number of tp found
-            self.count[label] += n_tps
-            # logging(f"self.count[{label}]: {self.count[label]} (here:{n_tps})")
-            # # sum pixels feature-wise 
-            # logits_tps_sum = (logits_tps).sum(dim=0)
-            # # logging(f"logits_tps_sum: {logits_tps_sum.shape} {logits_tps_sum}")
-            #-> but can be large, let's divide before instead of later (-> compute contributions before then reduce)
-            logits_tps_contrib_sum = (logits_tps / (self.count[label] + 1e-8)).sum(dim=0)
-            # logging(f"logits_tps_contrib_sum: {logits_tps_contrib_sum.shape} {logits_tps_contrib_sum}")
+            alpha = 0.1
+            self.count[label] += 1
             #-> let's calc features contributions as well
-            features_contrib = self.features[label] / (self.count[label] + 1e-8)
-            # logging(f"features_contrib: {features_contrib.shape} {features_contrib}")
+            features_contrib = self.features[label]
             # get new data delta from mean
-            delta = logits_tps_contrib_sum - features_contrib
-            # logging(f"delta:{delta}")
+            delta = (logits_tps.mean(dim=0) - features_contrib)
             # get new mean for label - add new contributions
-            self.features[label] = self.features[label] + delta # instead of: self.features[label] + (delta \ count)
-            # logging(f"self.features[label]:{self.features[label]}")
+            self.features[label] = (self.features[label] + delta  / (self.count[label] + 1e-8))  if (self.features[label] != var_to_device(torch.zeros(self.n_classes))).any() else logits_tps.mean(dim=0) # instead of: self.features[label] + (delta \ count)
             #-> let's calc features contributions as well
-            features_contrib = self.features[label] / (self.count[label] + 1e-8)
-            # logging(f"features_contrib: {features_contrib.shape} {features_contrib}")
+            features_contrib = self.features[label] 
             # get new delta from new mean
-            delta2 = logits_tps_contrib_sum - features_contrib
+            delta2 = (logits_tps.mean(dim=0) - features_contrib)
             # accumulate delta differences
-            self.features2[label] += (delta * delta2)
+            self.features2[label] = ((self.features2[label] + delta * delta2)) if (self.features2[label] != var_to_device(torch.zeros(self.n_classes))).any() else (delta * delta2)
             
-            # import pandas as pd
-            # print(f"label=[{label}]")
-            # print(pd.DataFrame(logits_tps.detach().cpu().flatten()).describe())
-            # logging(f"delta2:{delta2}")
-            # #-> let's calc features2 contributions as well
-            # var_contrib = self.var[label] / (self.count[label] + 1e-8)
-            # # logging(f"var_contrib: {var_contrib.shape} {var_contrib}")
-            # get new squared mean - useful for finalize standard deviation
-            # # logging(f"self.features2[label]:{self.features2[label]}")
-            # # get new variance for label
-            # self.var[label] = self.features2[label] / self.count[label]
-            # logging(f"self.var[label]:{self.var[label]}")
-            
-            # print(f"self.count[{label}]: {self.count[label]} (here:{n_tps}) (mean.mean:{self.features[label].mean()} (var.mean:{self.var[label].mean()})")
-
     def forward(
         self, logits: torch.Tensor, sem_gt: torch.Tensor, is_train: torch.bool  
     ) -> torch.Tensor:
@@ -267,84 +189,37 @@ class OWLoss(nn.Module):
         # let's order by pixels
         logits_permuted = logits.permute(0, 2, 3, 1)
 
-        # acc_loss = var_to_device(torch.tensor(0.0))
-        # for label in gt_labels[:-1]:
-        #     mav = self.previous_features[label]
-        #     logs = logits_permuted[torch.where(sem_gt == label)]
-        #     mav = mav.expand(logs.shape[0], -1)
-        #     if self.previous_count[label] > 0:
-        #         ew_l1 = self.criterion(logs, mav)
-        #         ew_l1 = ew_l1 / (self.var[label] + 1e-8)
-        #         if self.hinged:
-        #             ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
-        #         acc_loss += ew_l1.mean()
-
         acc_loss = var_to_device(torch.tensor(0.0))
         
         for label in gt_labels[:-1]:
             # finalize accumulations
             mav = self.previous_features[label]
-            var =  self.previous_features2[label]
+            var =  self.previous_features2[label] / (self.previous_count[label] + 1e-8)
             logs = logits_permuted[torch.where(sem_gt == label)]
             mav = mav.expand(logs.shape[0], -1)
             if self.previous_count[label] > 0:
                 num = (self.criterion(logs, mav) ** 2 ) if self.mav_squared else (self.criterion(logs, mav))
                 den = (var[label] ** 2 + 1e-8)     if self.mav_squared else (var[label] + 1e-8)
-                # print(f"mav_squared[{label}]:{self.mav_squared}")
-                # print(f"num.max():{num.max()} num.min():{num.min()}")
-                # print(f"den.max():{den.max()} den.min():{den.min()}")
                 ew_l1 = num / den # squared
-                # logging(f"self.features[{label}]:{self.features[label]}")
-                # logging(f"self.var[{label}]:{self.var[label]}")
-                # logging(f"ew_l1[{label}]-1:{ew_l1}")
-                # logging(f"ew_l1[{label}]-2:{ew_l1}")
                 ew_l1_mean = ew_l1.mean()
-                # logging(f"ew_l1[{label}].mean-3:{ew_l1_mean}")
                 if self.hinged:
                     ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
-                    # logging(f"hinged ew_l1[{label}]:{ew_l1}")
                 acc_loss += ew_l1_mean # instead of mean
-                # logging(f"acc_loss:{acc_loss}")
-        
-        # print(f"count.max():{self.previous_count.max()} den.min():{self.previous_count.min()}")
         return acc_loss
 
     def update(self):
-        # self.previous_features = self.features
-        # self.previous_count = self.count
-        # for c in self.var.keys():
-        #     self.var[c] = (self.ex2[c] - self.ex[c] ** 2 / (self.count[c] + 1e-8)) / (
-        #         self.count[c] + 1e-8
-        #     )
-
-        # # resetting for next epoch
-        # self.count = torch.zeros(self.n_classes)  # count for class
-        # self.features = {
-        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
-        # }
-        # self.ex = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
-        # self.ex2 = {
-        #     i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
-        # }
-
-        # return self.previous_features, self.var
+        zeros = {i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)}
         if self.previous_features is not None:
-            return self.previous_features, self.previous_features2
-        zeros = {
-            i: var_to_device(torch.zeros(self.n_classes)) for i in range(self.n_classes)
-            }
+            return torch.stack(list(self.previous_features.values())), torch.stack(list(self.previous_features2.values())) / (self.previous_count + 1e-8)
         return zeros, zeros
     
     def read(self):
-        mav_tensor = torch.zeros(self.n_classes, self.n_classes)
-        # if self.previous_features is not None:
-        #     for key in self.previous_features.keys():
-        #         mav_tensor[key] = self.previous_features[key]
-        
-        if self.features is not None:
-            for key in self.features.keys():
-                mav_tensor[key] = self.features[key]
-        return mav_tensor
+        zeros = var_to_device(torch.zeros(self.n_classes, self.n_classes))
+        # return mav tensors
+        if self.previous_features is not None:
+            return torch.stack(list(self.previous_features.values())) , torch.stack(list(self.previous_features2.values())) / (self.previous_count + 1e-8)
+        return zeros, zeros
+
 
 
 class ObjectosphereLoss(nn.Module):
@@ -388,7 +263,6 @@ class CrossEntropyLoss2d(nn.Module):
 
     def forward(self, inputs, targets):
         # logging("-> CrossEntropyLoss2d forward")
-        # logging(f"input inputs.shape:{inputs.shape} targets.shape:{targets.shape}")
         losses = []
         targets_m = targets.clone()
         if targets_m.sum() == 0:
@@ -398,11 +272,8 @@ class CrossEntropyLoss2d(nn.Module):
         number_of_pixels_per_class = torch.bincount(
             targets.flatten().type(self.dtype), minlength=self.num_classes
         )
-        import pandas as pd
-        # logging(f"targets values range: {targets.min()} - {targets.max()}")
+        # import pandas as pd
 
-        # logging(f"after bincount number_of_pixels_per_class.shape:{number_of_pixels_per_class.shape}")
-        # logging(f"remember self.weight.shape:{self.weight.shape} values:{self.weight}")
         divisor_weighted_pixel_sum = torch.sum(
             number_of_pixels_per_class[1:] * self.weight
         )  # without void
@@ -559,3 +430,101 @@ def get_best_checkpoint(ckpt_dir, key="mIoU_test"):
     assert os.path.exists(ckpt_path), f"There is no weights file named {ckpt_path}"
     print(f"Best mIoU: {100*miou:0.2f} at epoch: {epoch}")
     return ckpt_path
+
+
+def justify(text, length):
+    if len(text) >= length:
+        return text
+    text = text.ljust(len(text)+(length-len(text))//2) # add half spaces after
+    text = text.rjust(len(text)+(length-len(text))) # add remaining spaces before
+    return text
+
+
+def show_preds(preds: list[torch.Tensor], batch_sample: list[dict], titles: list[str], vmin=0, vmax=11, show=True):
+    # init titles
+    titles = titles if titles is not None else [f"{i}" for i,_ in enumerate(preds)]
+    # retrieve batch size
+    batch_size = len(batch_sample)
+    # retrieve number of predictions of different models to show
+    n_preds = len(preds)
+    # define figure and its size
+    fig = plt.figure(figsize=(12+6*n_preds,6*n_preds))
+    # first 2-rows plotting
+    for i, sample in enumerate(batch_sample):
+        # copy sample
+        sample = {"image":sample["image"], "label":sample["label"], "name":sample["name"]}
+        # in-place processing
+        sample = UnNormalize()(ToNumpy()(sample))
+        # retrive images
+        name = sample["name"]
+        img = sample["image"]
+        label = sample["label"]
+        # plot input image
+        plt.subplot(2+n_preds, batch_size, i+1)
+        plt.imshow(img, vmin=0, vmax=255)
+        plt.title(f"{os.path.basename(name)}", fontsize=10+2*n_preds)
+        # plot labels
+        plt.subplot(2+n_preds, batch_size, batch_size+(i+1))
+        plt.imshow(label, vmin=vmin, vmax=vmax)
+        if i == batch_size-1: plt.title(justify("Labels", 10+2*n_preds), rotation=-90, x=1.1, y=0, fontsize=10+2*n_preds) # vertical title
+    # from 3-row onwards plotting
+    for j in range(n_preds):
+        for i, pred in enumerate(preds[j]):
+            # plot predictions
+            plt.subplot(2+n_preds, batch_size, (2+j)*batch_size+(i+1))
+            plt.imshow(pred, vmin=vmin, vmax=vmax)
+            if i == batch_size-1: plt.title(justify(titles[j], 10+2*n_preds), rotation=-90, x=1.1, y=0, fontsize=10+2*n_preds) # vertical title
+    plt.tight_layout()
+    if show: plt.show()
+    return fig
+
+import torch.nn.functional as F
+
+def contMAV_ss_score(pred_ss, mavs, vars):
+    # let's build the gaussian model
+    d_pred = (
+        pred_ss[:, None, ...] - mavs[None, :, :, None, None]
+    )  # [8,1,19,h,w] - [1,19,19,1,1] ## class-wise diff
+    d_pred_ = d_pred / (vars[None, :, :, None, None] + 1e-8) ## class-wise division
+    # using exponential kernel
+    scores = torch.exp(-torch.einsum("bcfhw,bcfhw->bchw", d_pred_, d_pred) / 2)
+    # get maximum in class dimension
+    best = scores.max(dim=1)
+    return 1 - best[0], best[1] # return (1-values, max_indexes)
+
+def ss_postprocess_fn(pred_ss, pred_ow, mavs, vars):
+    # contMAV scores
+    ss_score1, similarity = contMAV_ss_score(pred_ss, mavs, vars) if (mavs != var_to_device(torch.zeros_like(mavs))).any() else (None, None)  # ss decoder score
+    # order class logits by batch x pixel
+    logits_ss = pred_ss.permute(0, 2, 3, 1)
+    # get arg max of predicted classes
+    preds = torch.argmax(logits_ss, dim=-1).detach()
+    # add one to match label class numeration
+    preds += 1
+    similarity = similarity+1 if similarity is not None else None
+    ss_score1 = ss_score1*(len(mavs)-1) if ss_score1 is not None else None
+    return [preds.cpu()] + ([ss_score1.cpu()] if ss_score1 is not None else []) + ([similarity.cpu()] if similarity is not None else [])
+
+
+def save_figure(fig, dir, filename):
+    # create path
+    if not os.path.exists(dir): 
+        os.makedirs(os.path.abspath(dir))
+    # create path
+    path = os.path.join(dir, filename)
+    # save figure
+    fig.savefig(path)
+    return path
+
+
+def plot_to_image(fig, dir, filename, show=False):
+    path = None
+    # save figure
+    if dir: 
+        path = save_figure(fig, dir, filename)
+    # avoid showing figure unintentionally - useful to keep RAM occupancy low
+    if not show: plt.close(fig)
+    # plot to image
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img

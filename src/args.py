@@ -36,7 +36,7 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument(
             "--id",
             default="checkpoint",
-            help="path to the pretrained resnets with different" "encoder block",
+            help="path to where tensorboard results are stored",
         )
 
         # pretraining
@@ -352,7 +352,7 @@ class ArgumentParser(argparse.ArgumentParser):
         )
         self.add_argument(
             "--mav_squared",
-            default=True,
+            default=False,
             type=bool,
             help="Whether to use the squared mav loss function of Con2MAV, otherwise ContMav non-squared loss is used.",
         )

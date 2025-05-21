@@ -189,7 +189,7 @@ class UnNormalize:
         image = sample["image"]
         image = sample["image"] * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
 
-        sample["image"] = image
+        sample["image"] = np.round(image * 255.).astype(np.uint8)
 
         return sample
 

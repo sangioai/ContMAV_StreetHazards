@@ -115,5 +115,12 @@ def build_model(args, n_classes):
         for name, param in model.named_parameters():
             if "encoder_rgb" in name:
                 param.requires_grad = False
+    
+    if args.load_weights and args:
+        print(f"loading weights: {args.load_weights}")
+        weights = torch.load(args.load_weights, map_location=device)
+        if isinstance(weights, dict) and "state_dict" in weights.keys():
+            weights = weights["state_dict"]
+        model.load_state_dict(weights)
 
     return model, device
