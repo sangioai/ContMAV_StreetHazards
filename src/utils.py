@@ -194,7 +194,7 @@ class OWLoss(nn.Module):
         for label in gt_labels[:-1]:
             # finalize accumulations
             mav = self.previous_features[label]
-            var =  self.previous_features2[label] / (self.previous_count[label] + 1e-8)
+            var =  self.previous_features2[label]# / (self.previous_count[label] + 1e-8)
             logs = logits_permuted[torch.where(sem_gt == label)]
             mav = mav.expand(logs.shape[0], -1)
             if self.previous_count[label] > 0:
@@ -202,6 +202,7 @@ class OWLoss(nn.Module):
                 den = (var[label] ** 2 + 1e-8)     if self.mav_squared else (var[label] + 1e-8)
                 ew_l1 = num / den # squared
                 ew_l1_mean = ew_l1.mean()
+                print(f"[{label}] count.min():{self.previous_count[label].min()} count.max():{self.previous_count[label].max()} -> var.min():{var.min()} var.max():{var.max()} -> den.min():{den.min()} den.max():{den.max()} num.min():{num.min()} num.max():{num.max()} ->  ew_l1.max():{ew_l1.max()}")
                 if self.hinged:
                     ew_l1 = F.relu(ew_l1 - self.delta).sum(dim=1)
                 acc_loss += ew_l1_mean # instead of mean
