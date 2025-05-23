@@ -171,10 +171,7 @@ def train_main(args = []):
             model, optimizer, ckpt_path, device
         )
         start_epoch = epoch_last_ckpt + 1
-        loss_mav.previous_features = mav_dict
-        loss_mav.previous_features2 = std_dict
-        print(f"loss_mav.features: {mav_dict}")
-        print(f"loss_mav.var: {std_dict}")
+        loss_mav.previous_features = None
     else:
         start_epoch = 0
         best_miou = 0
@@ -519,14 +516,16 @@ def validate(
                 # only one batch while debugging
                 break
 
-    # get mavs, stds
-    mavs, vars = loss_mav.read()
-    # dict-of-arrays to array-of-dicts
-    sample_arr = [{"image":sample["image"][i], "label":sample["label"][i], "name":sample["name"][i]} for i,_ in enumerate(sample["image"])]
-    # figure to image
-    pred_titles = [f"sem{'+mav' if loss_mav else ''}{'+obj' if loss_mav else ''}{'+con' if loss_mav else ''}", f"ContMAV ss_score", f"ContMAV sim_score"]
-    fig = show_preds(ss_postprocess_fn(prediction_ss, None, mavs, vars), sample_arr, show=False, titles=pred_titles)
-    img = plot_to_image(fig, "./images", f"{epoch}.png")
+    if loss_mav:
+        # get mavs, stds
+        mavs, vars = loss_mav.read()
+        # dict-of-arrays to array-of-dicts
+        sample_arr = [{"image":sample["image"][i], "label":sample["label"][i], "name":sample["name"][i]} for i,_ in enumerate(sample["image"])]
+        # figure to image
+        pred_titles = [f"sem{'+mav' if loss_mav else ''}{'+obj' if loss_mav else ''}{'+con' if loss_mav else ''}", f"ContMAV ss_score", f"ContMAV sim_score"]
+        fig = show_preds(ss_postprocess_fn(prediction_ss, None, mavs, vars), sample_arr, show=False, titles=pred_titles)
+        img = plot_to_image(fig, "./images", f"{epoch}.png")
+        writer.add_image("Images/segmentation", img, epoch, dataformats="HWC")
     
 
     # aupr = compute_ap.compute().detach().cpu()
@@ -541,7 +540,6 @@ def validate(
     )
     writer.add_scalar("Loss/val", total_loss, epoch)
     writer.add_scalar("Metrics/miou", miou, epoch)
-    writer.add_image("Images/segmentation", img, epoch, dataformats="HWC")
     # writer.add_image("Images/anomaly", miou, epoch)
     # writer.add_scalar("Metrics/aupr", aupr, epoch)
     for i, iou in enumerate(ious):
